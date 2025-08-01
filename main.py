@@ -1,0 +1,174 @@
+from fastapi import FastAPI, APIRouter, Depends, HTTPException, Header, Body, BackgroundTasks
+from pydantic import BaseModel
+from typing import List, Dict, Any
+import logging
+import os
+import subprocess
+import threading
+import requests
+import time
+
+# Konfigurasi logging dasar
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Kunci API statis untuk keamanan awal.
+AGENT_API_KEY = os.getenv("AGENT_API_KEY", "a-very-secret-agent-key")
+
+app = FastAPI(
+    title="StreamCurl VPS Agent",
+    description="Agen ringan untuk menjalankan tugas streaming FFmpeg di VPS.",
+    version="0.1.0"
+)
+
+router = APIRouter()
+
+# Dictionary untuk melacak proses FFmpeg yang sedang berjalan
+running_processes: Dict[int, subprocess.Popen] = {}
+
+# --- Model Pydantic untuk validasi payload ---
+class StreamStartPayload(BaseModel):
+    stream_id: int
+    ffmpeg_command: List[str]
+    callback_url: str
+    callback_api_key: str
+
+class StreamStopPayload(BaseModel):
+    stream_id: int
+
+# --- Dependency untuk Keamanan ---
+async def verify_api_key(x_api_key: str = Header(...)):
+    """Memverifikasi kunci API yang dikirim di header."""
+    if x_api_key != AGENT_API_KEY:
+        logger.warning(f"Upaya akses ditolak dengan kunci API yang salah: {x_api_key}")
+        raise HTTPException(status_code=403, detail="Forbidden: Invalid API Key")
+
+# --- Fungsi Helper ---
+def _stop_process(stream_id: int):
+    """Menghentikan dan membersihkan proses yang ada."""
+    if stream_id in running_processes:
+        process = running_processes[stream_id]
+        if process.poll() is None:  # Jika proses masih berjalan
+            logger.info(f"Menghentikan proses yang ada untuk stream {stream_id} (PID: {process.pid})")
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logger.warning(f"Proses {stream_id} tidak berhenti, memaksa kill.")
+                process.kill()
+        del running_processes[stream_id]
+        logger.info(f"Proses untuk stream {stream_id} telah dibersihkan.")
+
+def _send_status_update(callback_url: str, api_key: str, stream_id: int, status: str, details: str = ""):
+    """Mengirim pembaruan status kembali ke server utama."""
+    payload = {"stream_id": stream_id, "status": status, "details": details}
+    headers = {"X-Agent-Api-Key": api_key}
+    try:
+        # Coba beberapa kali jika gagal
+        for attempt in range(3):
+            try:
+                response = requests.post(callback_url, json=payload, headers=headers, timeout=10)
+                response.raise_for_status()
+                logger.info(f"Berhasil mengirim status '{status}' untuk stream {stream_id} ke {callback_url}")
+                return
+            except requests.RequestException as e:
+                logger.warning(f"Gagal mengirim status (percobaan {attempt+1}/3): {e}")
+                time.sleep(2)
+        logger.error(f"Gagal mengirim status '{status}' untuk stream {stream_id} setelah beberapa percobaan.")
+    except Exception as e:
+        logger.error(f"Terjadi kesalahan tak terduga saat mengirim status: {e}")
+
+
+def _monitor_process(process: subprocess.Popen, payload: StreamStartPayload):
+    """Memantau proses FFmpeg dan mengirim callback saat selesai atau gagal."""
+    # Beri waktu FFmpeg untuk memulai
+    time.sleep(5)
+    
+    # Periksa apakah proses dimulai dengan sukses
+    if process.poll() is None:
+        # Proses berjalan, kirim status LIVE
+        _send_status_update(payload.callback_url, payload.callback_api_key, payload.stream_id, "LIVE", "Stream is now live on VPS.")
+    else:
+        # Proses gagal dimulai
+        error_output = process.stderr.read() if process.stderr else "No stderr."
+        logger.error(f"FFmpeg untuk stream {payload.stream_id} gagal dimulai. Kode: {process.returncode}. Output: {error_output}")
+        _send_status_update(payload.callback_url, payload.callback_api_key, payload.stream_id, "Error", f"FFmpeg failed to start on VPS. Code: {process.returncode}")
+        return
+
+    # Tunggu hingga proses selesai
+    process.wait()
+
+    # Proses telah selesai
+    if process.returncode == 0:
+        logger.info(f"Stream {payload.stream_id} selesai dengan sukses.")
+        _send_status_update(payload.callback_url, payload.callback_api_key, payload.stream_id, "Idle", "Stream finished successfully on VPS.")
+    else:
+        error_output = process.stderr.read() if process.stderr else "No stderr."
+        logger.error(f"Stream {payload.stream_id} berhenti dengan error. Kode: {process.returncode}. Output: {error_output}")
+        _send_status_update(payload.callback_url, payload.callback_api_key, payload.stream_id, "Error", f"FFmpeg exited with code {process.returncode} on VPS.")
+    
+    # Bersihkan dari daftar proses yang berjalan
+    if payload.stream_id in running_processes:
+        del running_processes[payload.stream_id]
+
+
+# --- Endpoint API ---
+@router.post("/stream/start", dependencies=[Depends(verify_api_key)])
+async def start_stream(payload: StreamStartPayload, background_tasks: BackgroundTasks):
+    """
+    Menerima perintah FFmpeg dan memulainya di VPS ini.
+    """
+    logger.info(f"Menerima permintaan untuk memulai stream ID: {payload.stream_id}")
+    logger.info(f"Perintah FFmpeg: {' '.join(payload.ffmpeg_command)}")
+
+    # Hentikan proses yang ada untuk stream_id ini jika ada
+    _stop_process(payload.stream_id)
+
+    try:
+        # Jalankan perintah FFmpeg sebagai subproses
+        process = subprocess.Popen(
+            payload.ffmpeg_command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        running_processes[payload.stream_id] = process
+        logger.info(f"Memulai proses FFmpeg untuk stream {payload.stream_id} dengan PID: {process.pid}")
+
+        # Jalankan monitor di thread terpisah agar tidak memblokir
+        monitor_thread = threading.Thread(target=_monitor_process, args=(process, payload))
+        monitor_thread.daemon = True
+        monitor_thread.start()
+
+    except Exception as e:
+        logger.error(f"Gagal memulai subproses untuk stream {payload.stream_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to start subprocess: {e}")
+
+    return {"status": "success", "message": f"Stream {payload.stream_id} is starting on VPS."}
+
+@router.post("/stream/stop", dependencies=[Depends(verify_api_key)])
+async def stop_stream(payload: StreamStopPayload):
+    """
+    Menghentikan proses streaming FFmpeg yang sedang berjalan untuk stream_id tertentu.
+    """
+    logger.info(f"Menerima permintaan untuk menghentikan stream ID: {payload.stream_id}")
+
+    if payload.stream_id not in running_processes:
+        logger.warning(f"Tidak ada stream yang berjalan untuk ID {payload.stream_id}, tidak ada tindakan yang diambil.")
+        return {"status": "not_found", "message": f"Stream {payload.stream_id} not found or not running."}
+
+    _stop_process(payload.stream_id)
+
+    return {"status": "success", "message": f"Stop command issued for stream {payload.stream_id}."}
+
+@router.get("/health")
+async def health_check():
+    """Endpoint sederhana untuk memeriksa apakah agen berjalan."""
+    return {"status": "ok", "running_streams": list(running_processes.keys())}
+
+app.include_router(router, prefix="/agent/v1")
+
+if __name__ == "__main__":
+    import uvicorn
+    # Jalankan server di 0.0.0.0 agar dapat diakses dari luar container/VPS
+    uvicorn.run(app, host="0.0.0.0", port=8002)
