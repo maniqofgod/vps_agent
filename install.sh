@@ -44,17 +44,17 @@ echo "---------------------------------------------"
 
 # 5. Hasilkan Kunci API dan mulai layanan dengan PM2
 echo "[5/6] Menghasilkan Kunci API dan memulai layanan agen..."
+# Panggil fungsi Python secara langsung untuk membuat .env dan API key secara andal
+echo "Membuat file .env dan API Key..."
+python3 -c "from main import setup_api_key; setup_api_key()"
+
 # Hapus proses lama jika ada untuk memastikan instalasi bersih
 pm2 delete vps-agent || true
 
-# Jalankan aplikasi dengan PM2 untuk membuat .env dan menjalankannya sebagai layanan
+# Jalankan aplikasi dengan PM2 (sekarang akan membaca .env yang sudah ada)
 pm2 start "uvicorn main:app --host 0.0.0.0 --port 8002" --name vps-agent
-# Beri waktu 3 detik untuk aplikasi memulai dan membuat file
-sleep 3
-# Simpan konfigurasi PM2 agar layanan berjalan saat reboot
 pm2 save
 # Atur PM2 untuk berjalan saat startup (menggunakan path dinamis)
-# Perintah ini akan dieksekusi oleh shell, yang akan menemukan pm2 di PATH
 sudo env PATH=$PATH pm2 startup systemd -u $(whoami) --hp $(echo $HOME)
 
 echo "Layanan agen telah dimulai dengan PM2."
