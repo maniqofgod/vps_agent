@@ -7,18 +7,46 @@ import subprocess
 import threading
 import requests
 import time
+import secrets
+from dotenv import load_dotenv, find_dotenv, set_key
 
-# Konfigurasi logging dasar
+# --- Konfigurasi Awal & Pembuatan Kunci API ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Kunci API statis untuk keamanan awal.
-AGENT_API_KEY = os.getenv("AGENT_API_KEY", "a-very-secret-agent-key")
+def setup_api_key():
+    """
+    Memeriksa, membuat, dan memuat Kunci API dari file .env.
+    Mengembalikan kunci API.
+    """
+    dotenv_path = find_dotenv()
+    if not dotenv_path:
+        # Buat file .env jika tidak ada
+        dotenv_path = ".env"
+        open(dotenv_path, 'a').close()
+        logger.info("File .env tidak ditemukan, membuat yang baru.")
+
+    load_dotenv(dotenv_path)
+    api_key = os.getenv("AGENT_API_KEY")
+
+    if not api_key:
+        # Buat dan simpan kunci API baru jika tidak ada di .env
+        logger.info("Kunci API tidak ditemukan di .env, membuat kunci baru...")
+        new_key = secrets.token_hex(32)
+        set_key(dotenv_path, "AGENT_API_KEY", new_key)
+        logger.info(f"Kunci API baru telah dibuat dan disimpan di {dotenv_path}")
+        return new_key
+    
+    logger.info("Kunci API berhasil dimuat dari .env")
+    return api_key
+
+# Muat atau buat kunci API saat aplikasi dimulai
+AGENT_API_KEY = setup_api_key()
 
 app = FastAPI(
     title="StreamCurl VPS Agent",
     description="Agen ringan untuk menjalankan tugas streaming FFmpeg di VPS.",
-    version="0.1.0"
+    version="0.1.1"
 )
 
 router = APIRouter()
