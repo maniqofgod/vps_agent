@@ -19,7 +19,7 @@ show_help() {
     echo "Penggunaan: ./agentctl.sh [perintah]"
     echo ""
     echo "Perintah yang tersedia:"
-    echo "  start     Menjalankan layanan agen (jika belum berjalan)"
+    echo "  start     Menjalankan atau memulai ulang layanan agen"
     echo "  stop      Menghentikan layanan agen"
     echo "  restart   Memulai ulang layanan agen"
     echo "  logs      Menampilkan log realtime dari layanan agen"
@@ -34,8 +34,9 @@ check_pm2
 # Logika utama untuk menangani perintah
 case "$1" in
     start)
-        echo "Menjalankan layanan $SERVICE_NAME..."
-        pm2 start --name "$SERVICE_NAME" "uvicorn main:app --host 0.0.0.0 --port 8002"
+        echo "Memastikan layanan $SERVICE_NAME berjalan..."
+        # Coba restart dulu, jika gagal (karena belum ada), baru start
+        pm2 restart "$SERVICE_NAME" || pm2 start "uvicorn main:app --host 0.0.0.0 --port 8002" --name "$SERVICE_NAME"
         pm2 save
         ;;
     stop)

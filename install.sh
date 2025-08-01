@@ -44,6 +44,9 @@ echo "---------------------------------------------"
 
 # 5. Hasilkan Kunci API dan mulai layanan dengan PM2
 echo "[5/6] Menghasilkan Kunci API dan memulai layanan agen..."
+# Hapus proses lama jika ada untuk memastikan instalasi bersih
+pm2 delete vps-agent || true
+
 # Jalankan aplikasi dengan PM2 untuk membuat .env dan menjalankannya sebagai layanan
 pm2 start "uvicorn main:app --host 0.0.0.0 --port 8002" --name vps-agent
 # Beri waktu 3 detik untuk aplikasi memulai dan membuat file
