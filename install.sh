@@ -53,8 +53,9 @@ pm2 start "uvicorn main:app --host 0.0.0.0 --port 8002" --name vps-agent
 sleep 3
 # Simpan konfigurasi PM2 agar layanan berjalan saat reboot
 pm2 save
-# Atur PM2 untuk berjalan saat startup
-sudo env PATH=$PATH:/usr/bin /usr/lib/node_modules/pm2/bin/pm2 startup systemd -u $(whoami) --hp $(echo $HOME)
+# Atur PM2 untuk berjalan saat startup (menggunakan path dinamis)
+# Perintah ini akan dieksekusi oleh shell, yang akan menemukan pm2 di PATH
+sudo env PATH=$PATH pm2 startup systemd -u $(whoami) --hp $(echo $HOME)
 
 echo "Layanan agen telah dimulai dengan PM2."
 echo "---------------------------------------------"
