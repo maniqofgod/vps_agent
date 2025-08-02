@@ -10,6 +10,71 @@ import time
 import secrets
 import psutil
 from dotenv import load_dotenv, find_dotenv, set_key
+import shutil
+from urllib.parse import urlparse
+
+# --- Direktori untuk media yang diunduh ---
+MEDIA_DOWNLOAD_DIR = "/tmp/stream_media"
+
+
+def download_media_and_rewrite_command(stream_id: int, command: List[str]) -> (List[str], str):
+    """
+    Mengunduh semua input media dari URL, menyimpannya secara lokal,
+    dan menulis ulang perintah FFmpeg untuk menggunakan file lokal.
+
+    Mengembalikan tuple berisi (perintah_baru, direktori_media_lokal).
+    """
+    stream_media_dir = os.path.join(MEDIA_DOWNLOAD_DIR, str(stream_id))
+    
+    # Bersihkan direktori lama jika ada dan buat yang baru
+    if os.path.exists(stream_media_dir):
+        shutil.rmtree(stream_media_dir)
+    os.makedirs(stream_media_dir, exist_ok=True)
+    
+    logger.info(f"Direktori media untuk stream {stream_id} dibuat di: {stream_media_dir}")
+
+    new_command = []
+    is_input_arg = False
+
+    for i, arg in enumerate(command):
+        if arg == '-i':
+            is_input_arg = True
+            new_command.append(arg)
+            continue
+
+        if is_input_arg and (arg.startswith('http://') or arg.startswith('https://')):
+            try:
+                url = arg
+                filename = os.path.basename(urlparse(url).path)
+                # Tambahkan query string ke nama file untuk keunikan jika ada
+                query = urlparse(url).query
+                if query:
+                    filename += f"_{query}"
+
+                local_path = os.path.join(stream_media_dir, filename)
+                
+                logger.info(f"Mengunduh media dari {url} ke {local_path}...")
+                
+                with requests.get(url, stream=True) as r:
+                    r.raise_for_status()
+                    with open(local_path, 'wb') as f:
+                        for chunk in r.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                
+                logger.info(f"Berhasil mengunduh {url}")
+                new_command.append(local_path)
+
+            except requests.RequestException as e:
+                logger.error(f"Gagal mengunduh media dari {arg}: {e}")
+                # Jika unduhan gagal, hentikan proses dan lemparkan exception
+                raise Exception(f"Failed to download media: {arg}") from e
+            finally:
+                is_input_arg = False
+        else:
+            new_command.append(arg)
+            is_input_arg = False
+            
+    return new_command, stream_media_dir
 
 # --- Konfigurasi Awal & Pembuatan Kunci API ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -74,7 +139,7 @@ async def verify_api_key(x_api_key: str = Header(...)):
 
 # --- Fungsi Helper ---
 def _stop_process(stream_id: int):
-    """Menghentikan dan membersihkan proses yang ada."""
+    """Menghentikan proses yang ada dan membersihkan direktorinya."""
     if stream_id in running_processes:
         process = running_processes[stream_id]
         if process.poll() is None:  # Jika proses masih berjalan
@@ -87,6 +152,15 @@ def _stop_process(stream_id: int):
                 process.kill()
         del running_processes[stream_id]
         logger.info(f"Proses untuk stream {stream_id} telah dibersihkan.")
+
+        # Bersihkan juga direktori media yang terkait
+        media_dir = os.path.join(MEDIA_DOWNLOAD_DIR, str(stream_id))
+        if os.path.exists(media_dir):
+            try:
+                shutil.rmtree(media_dir)
+                logger.info(f"Berhasil membersihkan direktori media saat stop: {media_dir}")
+            except Exception as e:
+                logger.error(f"Gagal membersihkan direktori media {media_dir} saat stop: {e}")
 
 def _send_status_update(callback_url: str, api_key: str, stream_id: int, status: str, details: str = ""):
     """Mengirim pembaruan status kembali ke server utama."""
@@ -108,8 +182,10 @@ def _send_status_update(callback_url: str, api_key: str, stream_id: int, status:
         logger.error(f"Terjadi kesalahan tak terduga saat mengirim status: {e}")
 
 
-def _monitor_process(process: subprocess.Popen, payload: StreamStartPayload):
-    """Memantau proses FFmpeg dan mengirim callback saat selesai atau gagal."""
+def _monitor_process(process: subprocess.Popen, payload: StreamStartPayload, media_dir: str):
+    """
+    Memantau proses FFmpeg, mengirim callback, dan membersihkan media yang diunduh.
+    """
     # Beri waktu FFmpeg untuk memulai
     time.sleep(5)
     
@@ -138,6 +214,14 @@ def _monitor_process(process: subprocess.Popen, payload: StreamStartPayload):
     if payload.stream_id in running_processes:
         del running_processes[payload.stream_id]
 
+    # Bersihkan direktori media yang diunduh
+    if os.path.exists(media_dir):
+        try:
+            shutil.rmtree(media_dir)
+            logger.info(f"Berhasil membersihkan direktori media: {media_dir}")
+        except Exception as e:
+            logger.error(f"Gagal membersihkan direktori media {media_dir}: {e}")
+
 
 # --- Endpoint API ---
 @router.post("/stream/start", dependencies=[Depends(verify_api_key)])
@@ -152,17 +236,21 @@ async def start_stream(payload: StreamStartPayload, background_tasks: Background
     _stop_process(payload.stream_id)
 
     try:
-        # Jalankan perintah FFmpeg sebagai subproses
-        # stdout dan stderr tidak di-pipe untuk menghindari deadlock. Output akan masuk ke log kontainer.
+        # Unduh semua media dan tulis ulang perintah untuk menggunakan path lokal
+        logger.info(f"Memulai pengunduhan media untuk stream {payload.stream_id}...")
+        rewritten_command, media_dir = download_media_and_rewrite_command(payload.stream_id, payload.ffmpeg_command)
+        logger.info(f"Pengunduhan media selesai. Perintah FFmpeg yang baru: {' '.join(rewritten_command)}")
+
+        # Jalankan perintah FFmpeg yang sudah dimodifikasi sebagai subproses
         process = subprocess.Popen(
-            payload.ffmpeg_command,
+            rewritten_command,
             text=True
         )
         running_processes[payload.stream_id] = process
         logger.info(f"Memulai proses FFmpeg untuk stream {payload.stream_id} dengan PID: {process.pid}")
 
         # Jalankan monitor di thread terpisah agar tidak memblokir
-        monitor_thread = threading.Thread(target=_monitor_process, args=(process, payload))
+        monitor_thread = threading.Thread(target=_monitor_process, args=(process, payload, media_dir))
         monitor_thread.daemon = True
         monitor_thread.start()
 
