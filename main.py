@@ -201,8 +201,7 @@ async def test_streaming():
             test_command,
             capture_output=True,
             text=True,
-            timeout=20,
-            encoding='utf-8'
+            timeout=20
         )
         
         status = "success" if result.returncode == 0 else "failure"
