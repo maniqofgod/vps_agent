@@ -128,6 +128,7 @@ class ThumbnailGeneratePayload(BaseModel):
     stream_id: int
     ffmpeg_command: List[str]
     upload_url: str
+    callback_api_key: str
 
 # --- Dependency Keamanan ---
 async def verify_api_key(x_api_key: str = Header(..., alias="x-api-key")):
@@ -259,7 +260,7 @@ async def generate_thumbnail(payload: ThumbnailGeneratePayload):
         if os.path.exists(local_thumbnail_path):
             with open(local_thumbnail_path, 'rb') as f:
                 files = {'thumbnail_file': ('thumbnail.jpg', f, 'image/jpeg')}
-                headers = {"x-agent-api-key": AGENT_API_KEY}
+                headers = {"x-agent-api-key": payload.callback_api_key}
                 response = requests.post(payload.upload_url, files=files, headers=headers)
                 response.raise_for_status()
             logger.info(f"Berhasil mengunggah thumbnail untuk stream {payload.stream_id}")
