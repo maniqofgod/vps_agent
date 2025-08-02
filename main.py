@@ -74,7 +74,12 @@ def download_media_and_rewrite_command(stream_id: int, command: List[str]) -> (L
             new_command.append(arg)
             is_input_arg = False
             
-    return new_command, stream_media_dir
+return new_command, stream_media_dir
+
+class ThumbnailGeneratePayload(BaseModel):
+    stream_id: int
+    ffmpeg_command: List[str]
+    upload_url: str # URL untuk mengunggah thumbnail yang sudah jadi
 
 # --- Konfigurasi Awal & Pembuatan Kunci API ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -274,6 +279,61 @@ async def stop_stream(payload: StreamStopPayload):
     _stop_process(payload.stream_id)
 
     return {"status": "success", "message": f"Stop command issued for stream {payload.stream_id}."}
+@router.post("/thumbnail/generate", dependencies=[Depends(verify_api_key)])
+async def generate_thumbnail(payload: ThumbnailGeneratePayload, background_tasks: BackgroundTasks):
+    """
+    Menerima perintah untuk membuat thumbnail, menjalankannya di VPS,
+    dan mengunggah hasilnya kembali ke server utama.
+    """
+    logger.info(f"Menerima permintaan untuk membuat thumbnail untuk stream ID: {payload.stream_id}")
+    
+    media_dir = None
+    try:
+        # 1. Unduh media yang diperlukan
+        logger.info(f"Memulai pengunduhan media untuk thumbnail stream {payload.stream_id}...")
+        rewritten_command, media_dir = download_media_and_rewrite_command(payload.stream_id, payload.ffmpeg_command)
+        
+        # 2. Tentukan path output lokal untuk thumbnail
+        local_thumbnail_path = os.path.join(media_dir, "thumbnail.jpg")
+        
+        # Ganti placeholder output di perintah dengan path lokal
+        final_command = [arg if arg != "%%OUTPUT_PATH%%" else local_thumbnail_path for arg in rewritten_command]
+        logger.info(f"Perintah thumbnail final: {' '.join(final_command)}")
+
+        # 3. Jalankan FFmpeg untuk membuat thumbnail
+        process = subprocess.run(final_command, capture_output=True, text=True, timeout=60)
+
+        if process.returncode != 0:
+            logger.error(f"Gagal membuat thumbnail untuk stream {payload.stream_id}: {process.stderr}")
+            raise HTTPException(status_code=500, detail=f"FFmpeg failed for thumbnail: {process.stderr}")
+
+        # 4. Unggah thumbnail kembali ke server utama
+        if os.path.exists(local_thumbnail_path):
+            logger.info(f"Mengunggah thumbnail dari {local_thumbnail_path} ke {payload.upload_url}")
+            with open(local_thumbnail_path, 'rb') as f:
+                files = {'thumbnail_file': ('thumbnail.jpg', f, 'image/jpeg')}
+                # Gunakan header yang sama untuk otentikasi callback
+                headers = {"x-agent-api-key": AGENT_CALLBACK_API_KEY}
+                response = requests.post(payload.upload_url, files=files, headers=headers)
+                response.raise_for_status()
+            logger.info(f"Berhasil mengunggah thumbnail untuk stream {payload.stream_id}")
+        else:
+            raise HTTPException(status_code=500, detail="Thumbnail file was not created.")
+
+    except Exception as e:
+        logger.error(f"Gagal dalam proses pembuatan thumbnail untuk stream {payload.stream_id}: {e}", exc_info=True)
+        # Pastikan untuk mengirim HTTPException agar client tahu ada masalah
+        if not isinstance(e, HTTPException):
+            raise HTTPException(status_code=500, detail=str(e))
+        else:
+            raise e
+    finally:
+        # 5. Bersihkan direktori media
+        if media_dir and os.path.exists(media_dir):
+            shutil.rmtree(media_dir)
+            logger.info(f"Membersihkan direktori media thumbnail: {media_dir}")
+            
+    return {"status": "success", "message": "Thumbnail generated and uploaded successfully."}
 
 @router.get("/test-streaming", dependencies=[Depends(verify_api_key)])
 async def test_streaming():
@@ -341,6 +401,70 @@ async def get_stats():
 async def health_check():
     """Endpoint sederhana untuk memeriksa apakah agen berjalan."""
     return {"status": "ok", "running_streams": list(running_processes.keys())}
+# --- Endpoint untuk Manajemen Agen ---
+manage_router = APIRouter()
+
+def _run_agentctl_command(command: str) -> str:
+    """Menjalankan perintah agentctl.sh dan mengembalikan outputnya."""
+    try:
+        # Pastikan skrip dapat dieksekusi
+        script_path = "./agentctl.sh"
+        os.chmod(script_path, 0o755)
+        
+        result = subprocess.run(
+            [script_path, command],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        if result.returncode != 0:
+            # Jika ada error, kembalikan stderr untuk debugging
+            return f"Error executing '{command}':\n{result.stderr}"
+        return result.stdout
+    except FileNotFoundError:
+        return "Error: agentctl.sh not found."
+    except subprocess.TimeoutExpired:
+        return f"Error: Command '{command}' timed out."
+    except Exception as e:
+        return f"An unexpected error occurred: {str(e)}"
+
+@manage_router.get("/logs", dependencies=[Depends(verify_api_key)])
+async def get_agent_logs():
+    """Mengambil log terbaru dari agen menggunakan 'agentctl.sh logs'."""
+    # Perintah logs di pm2 bisa berjalan selamanya, jadi kita butuh pendekatan berbeda.
+    # Kita akan menggunakan 'pm2 logs --lines 100' untuk mendapatkan 100 baris terakhir.
+    try:
+        script_path = "./agentctl.sh"
+        os.chmod(script_path, 0o755)
+        
+        # Menggunakan pm2 langsung untuk mendapatkan sejumlah baris log
+@manage_router.post("/stop", dependencies=[Depends(verify_api_key)])
+async def stop_agent():
+    """Menghentikan layanan agen menggunakan 'agentctl.sh stop'."""
+    return _run_agentctl_command("stop")
+
+@manage_router.post("/restart", dependencies=[Depends(verify_api_key)])
+async def restart_agent():
+    """Memulai ulang layanan agen menggunakan 'agentctl.sh restart'."""
+    return _run_agentctl_command("restart")
+
+@manage_router.get("/status", dependencies=[Depends(verify_api_key)])
+async def get_agent_status():
+    """Mendapatkan status layanan agen menggunakan 'agentctl.sh status'."""
+    return _run_agentctl_command("status")
+        result = subprocess.run(
+            ["pm2", "logs", "vps-agent", "--lines", "200", "--nostream"],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        if result.returncode != 0:
+            return f"Error getting logs:\n{result.stderr}"
+        return result.stdout
+    except Exception as e:
+        return f"An unexpected error occurred while fetching logs: {str(e)}"
+
+app.include_router(manage_router, prefix="/agent/v1/manage")
 
 app.include_router(router, prefix="/agent/v1")
 
