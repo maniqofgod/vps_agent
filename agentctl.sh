@@ -36,7 +36,15 @@ case "$1" in
     start)
         echo "Memastikan layanan $SERVICE_NAME berjalan..."
         # Coba restart dulu, jika gagal (karena belum ada), baru start
-        pm2 restart "$SERVICE_NAME" || pm2 start "uvicorn main:app --host 0.0.0.0 --port 8002" --name "$SERVICE_NAME"
+        # Cari path python dari venv
+VENV_PYTHON="venv/bin/python"
+if [ ! -f "$VENV_PYTHON" ]; then
+    echo "Error: Virtual environment tidak ditemukan. Jalankan kembali install.sh."
+    exit 1
+fi
+# Gunakan path lengkap ke uvicorn di dalam venv
+UVICORN_PATH="venv/bin/uvicorn"
+pm2 restart "$SERVICE_NAME" || pm2 start "$UVICORN_PATH main:app --host 0.0.0.0 --port 8002" --name "$SERVICE_NAME" --interpreter "$VENV_PYTHON"
         pm2 save
         ;;
     stop)
