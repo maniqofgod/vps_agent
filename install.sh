@@ -34,9 +34,9 @@ echo "---------------------------------------------"
 
 
 # 1. Perbarui daftar paket dan instal dependensi sistem
-echo "[1/7] Menginstal dependensi sistem (git, python3, pip, venv)..."
+echo "[1/7] Menginstal dependensi sistem (git, python3, pip, venv, ffmpeg)..."
 sudo apt-get update
-sudo apt-get install -y git python3 python3-pip python3-venv
+sudo apt-get install -y git python3 python3-pip python3-venv ffmpeg
 
 echo "Dependensi sistem berhasil diinstal."
 echo "---------------------------------------------"
