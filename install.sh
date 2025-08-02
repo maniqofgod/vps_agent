@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Script untuk menginstal dan mengatur StreamCurl VPS Agent
+# Script untuk menginstal atau menginstal ulang StreamCurl VPS Agent
 # Dijalankan di server VPS yang bersih (direkomendasikan Ubuntu 22.04)
 
 echo "============================================="
@@ -10,49 +10,78 @@ echo "============================================="
 # Pastikan skrip berhenti jika terjadi error
 set -e
 
+# Langkah 0: Pembersihan Instalasi Sebelumnya
+echo "[0/7] Membersihkan instalasi sebelumnya (jika ada)..."
+# Hentikan dan hapus proses PM2 yang mungkin sudah ada untuk menghindari konflik
+if pm2 list | grep -q "vps-agent"; then
+    echo "Layanan 'vps-agent' yang ada ditemukan. Menghentikan dan menghapusnya..."
+    pm2 stop vps-agent || true
+    pm2 delete vps-agent || true
+    pm2 save --force
+    echo "Layanan PM2 lama berhasil dihapus."
+else
+    echo "Tidak ada layanan 'vps-agent' yang berjalan."
+fi
+
+# Hapus direktori lama jika ada untuk instalasi ulang yang bersih
+if [ -d "vps_agent" ]; then
+    echo "Direktori 'vps_agent' lama ditemukan. Menghapusnya..."
+    rm -rf vps_agent
+    echo "Direktori lama berhasil dihapus."
+fi
+echo "Pembersihan selesai."
+echo "---------------------------------------------"
+
+
 # 1. Perbarui daftar paket dan instal dependensi sistem
-echo "[1/6] Menginstal dependensi sistem (git, python3, pip, nodejs, npm)..."
+echo "[1/7] Menginstal dependensi sistem (git, python3, pip, venv)..."
 sudo apt-get update
-sudo apt-get install -y git python3 python3-pip nodejs npm
+sudo apt-get install -y git python3 python3-pip python3-venv
 
 echo "Dependensi sistem berhasil diinstal."
 echo "---------------------------------------------"
 
 # 2. Instal PM2 Process Manager
-echo "[2/6] Menginstal PM2 Process Manager via npm..."
+echo "[2/7] Menginstal PM2 Process Manager via npm..."
 sudo npm install pm2 -g
 
 echo "PM2 berhasil diinstal."
 echo "---------------------------------------------"
 
 # 3. Kloning repositori agen dari GitHub
-echo "[3/6] Mengkloning repositori agen dari GitHub..."
-# Hapus direktori lama jika ada untuk instalasi ulang
-rm -rf vps_agent
+echo "[3/7] Mengkloning repositori agen dari GitHub..."
 git clone https://github.com/maniqofgod/vps_agent.git
 cd vps_agent
 
 echo "Repositori berhasil dikloning."
 echo "---------------------------------------------"
 
-# 4. Instal dependensi Python
-echo "[4/6] Menginstal dependensi Python menggunakan pip..."
-pip3 install -r requirements.txt
+# 4. Buat dan aktifkan Virtual Environment
+echo "[4/7] Membuat Virtual Environment Python..."
+python3 -m venv venv
+
+echo "Virtual Environment berhasil dibuat."
+echo "---------------------------------------------"
+
+# 5. Instal dependensi Python di dalam venv
+echo "[5/7] Menginstal dependensi Python menggunakan pip di dalam venv..."
+source venv/bin/activate
+pip install -r requirements.txt
+deactivate
 
 echo "Dependensi Python berhasil diinstal."
 echo "---------------------------------------------"
 
-# 5. Hasilkan Kunci API dan mulai layanan dengan PM2
-echo "[5/6] Menghasilkan Kunci API dan memulai layanan agen..."
+# 6. Hasilkan Kunci API dan mulai layanan dengan PM2
+echo "[6/7] Menghasilkan Kunci API dan memulai layanan agen..."
 # Panggil fungsi Python secara langsung untuk membuat .env dan API key secara andal
 echo "Membuat file .env dan API Key..."
-python3 -c "from main import setup_api_key; setup_api_key()"
+venv/bin/python -c "from main import setup_api_key; setup_api_key()"
 
-# Hapus proses lama jika ada untuk memastikan instalasi bersih
-pm2 delete vps-agent || true
-
-# Jalankan aplikasi dengan PM2 (sekarang akan membaca .env yang sudah ada)
-pm2 start "uvicorn main:app --host 0.0.0.0 --port 8002" --name vps-agent
+# Jalankan aplikasi dengan PM2 menggunakan path absolut ke uvicorn di venv
+UVICORN_PATH="venv/bin/uvicorn"
+PYTHON_PATH="venv/bin/python"
+pm2 start "$UVICORN_PATH" --name vps-agent --interpreter "$PYTHON_PATH" -- main:app --host 0.0.0.0 --port 8002
 pm2 save
 # Atur PM2 untuk berjalan saat startup (menggunakan path dinamis)
 sudo env PATH=$PATH pm2 startup systemd -u $(whoami) --hp $(echo $HOME)
@@ -60,11 +89,11 @@ sudo env PATH=$PATH pm2 startup systemd -u $(whoami) --hp $(echo $HOME)
 echo "Layanan agen telah dimulai dengan PM2."
 echo "---------------------------------------------"
 
-# 6. Selesai! Tampilkan Kunci API dan instruksi
+# 7. Selesai! Tampilkan Kunci API dan instruksi
 chmod +x agentctl.sh
 API_KEY=$(grep AGENT_API_KEY .env | cut -d '=' -f2)
 
-echo "[6/6] Instalasi Selesai!"
+echo "[7/7] Instalasi Selesai!"
 echo "========================================================================"
 echo "                 >>> KUNCI API AGEN VPS ANDA <<<"
 echo "========================================================================"
