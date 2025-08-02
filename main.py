@@ -112,7 +112,8 @@ app = FastAPI(
 router = APIRouter()
 manage_router = APIRouter()
 
-running_processes: Dict[int, subprocess.Popen] = {}
+# Kamus untuk melacak proses: { job_id (pid): {"process": Popen, "stream_id": int, "media_dir": str} }
+running_processes: Dict[int, Dict[str, Any]] = {}
 
 # --- Model Pydantic ---
 class StreamStartPayload(BaseModel):
@@ -137,28 +138,43 @@ async def verify_api_key(x_api_key: str = Header(..., alias="x-api-key")):
         raise HTTPException(status_code=403, detail="Forbidden: Invalid API Key")
 
 # --- Fungsi Helper ---
-def _stop_process(stream_id: int):
-    """Menghentikan proses yang ada dan membersihkan direktorinya."""
-    if stream_id in running_processes:
-        process = running_processes[stream_id]
+def _stop_processes_by_stream_id(stream_id: int):
+    """Menghentikan semua proses yang berjalan yang cocok dengan stream_id."""
+    jobs_to_stop = [job_id for job_id, info in running_processes.items() if info["stream_id"] == stream_id]
+    
+    if not jobs_to_stop:
+        logger.warning(f"Tidak ada proses berjalan yang ditemukan untuk stream_id {stream_id}.")
+        return 0
+
+    for job_id in jobs_to_stop:
+        job_info = running_processes.get(job_id)
+        if not job_info:
+            continue
+
+        process = job_info["process"]
+        media_dir = job_info["media_dir"]
+
         if process.poll() is None:
-            logger.info(f"Menghentikan proses yang ada untuk stream {stream_id} (PID: {process.pid})")
+            logger.info(f"Menghentikan proses untuk pekerjaan {job_id} (stream {stream_id})")
             process.terminate()
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                logger.warning(f"Proses {stream_id} tidak berhenti, memaksa kill.")
+                logger.warning(f"Proses {job_id} tidak berhenti, memaksa kill.")
                 process.kill()
-        del running_processes[stream_id]
-        logger.info(f"Proses untuk stream {stream_id} telah dibersihkan.")
+        
+        if job_id in running_processes:
+            del running_processes[job_id]
 
-        media_dir = os.path.join(MEDIA_DOWNLOAD_DIR, str(stream_id))
         if os.path.exists(media_dir):
             try:
                 shutil.rmtree(media_dir)
-                logger.info(f"Berhasil membersihkan direktori media saat stop: {media_dir}")
+                logger.info(f"Membersihkan direktori media untuk pekerjaan {job_id}: {media_dir}")
             except Exception as e:
-                logger.error(f"Gagal membersihkan direktori media {media_dir} saat stop: {e}")
+                logger.error(f"Gagal membersihkan direktori media {media_dir}: {e}")
+    
+    logger.info(f"Berhasil menghentikan {len(jobs_to_stop)} proses untuk stream_id {stream_id}.")
+    return len(jobs_to_stop)
 
 def _send_status_update(callback_url: str, api_key: str, stream_id: int, status: str, details: str = ""):
     """Mengirim pembaruan status kembali ke server utama."""
@@ -178,28 +194,42 @@ def _send_status_update(callback_url: str, api_key: str, stream_id: int, status:
     except Exception as e:
         logger.error(f"Terjadi kesalahan tak terduga saat mengirim status: {e}")
 
-def _monitor_process(process: subprocess.Popen, payload: StreamStartPayload, media_dir: str):
+def _monitor_process(job_id: int, payload: StreamStartPayload):
     """Memantau proses FFmpeg, mengirim callback, dan membersihkan media yang diunduh."""
+    
+    job_info = running_processes.get(job_id)
+    if not job_info:
+        logger.error(f"Monitor: Tidak dapat menemukan informasi untuk pekerjaan {job_id}.")
+        return
+
+    process = job_info["process"]
+    media_dir = job_info["media_dir"]
+
     time.sleep(5)
     
     if process.poll() is None:
-        _send_status_update(payload.callback_url, payload.callback_api_key, payload.stream_id, "LIVE", "Stream is now live on VPS.")
+        _send_status_update(payload.callback_url, payload.callback_api_key, payload.stream_id, "LIVE", f"Stream is now live on VPS (Job ID: {job_id}).")
     else:
-        logger.error(f"FFmpeg untuk stream {payload.stream_id} gagal dimulai dengan kode {process.returncode}.")
-        _send_status_update(payload.callback_url, payload.callback_api_key, payload.stream_id, "Error", f"FFmpeg failed to start on VPS with code {process.returncode}.")
+        logger.error(f"FFmpeg untuk pekerjaan {job_id} (stream {payload.stream_id}) gagal dimulai dengan kode {process.returncode}.")
+        _send_status_update(payload.callback_url, payload.callback_api_key, payload.stream_id, "Error", f"FFmpeg failed to start on VPS (Job ID: {job_id}).")
+        # Hapus pekerjaan yang gagal dari daftar
+        if job_id in running_processes:
+            del running_processes[job_id]
         return
 
     process.wait()
 
     if process.returncode == 0:
-        logger.info(f"Stream {payload.stream_id} selesai dengan sukses.")
-        _send_status_update(payload.callback_url, payload.callback_api_key, payload.stream_id, "Idle", "Stream finished successfully on VPS.")
+        logger.info(f"Pekerjaan {job_id} (stream {payload.stream_id}) selesai dengan sukses.")
+        _send_status_update(payload.callback_url, payload.callback_api_key, payload.stream_id, "Idle", "Stream finished successfully.")
     else:
-        logger.error(f"Stream {payload.stream_id} berhenti dengan error. Kode: {process.returncode}.")
-        _send_status_update(payload.callback_url, payload.callback_api_key, payload.stream_id, "Error", f"FFmpeg exited with code {process.returncode} on VPS.")
+        logger.error(f"Pekerjaan {job_id} (stream {payload.stream_id}) berhenti dengan error. Kode: {process.returncode}.")
+        _send_status_update(payload.callback_url, payload.callback_api_key, payload.stream_id, "Error", f"FFmpeg exited with code {process.returncode}.")
     
-    if payload.stream_id in running_processes:
-        del running_processes[payload.stream_id]
+    # Pembersihan
+    if job_id in running_processes:
+        del running_processes[job_id]
+        logger.info(f"Pekerjaan {job_id} dibersihkan dari daftar.")
 
     if os.path.exists(media_dir):
         try:
@@ -213,18 +243,28 @@ def _monitor_process(process: subprocess.Popen, payload: StreamStartPayload, med
 async def start_stream(payload: StreamStartPayload, background_tasks: BackgroundTasks):
     """Menerima perintah FFmpeg dan memulainya di VPS ini."""
     logger.info(f"Menerima permintaan untuk memulai stream ID: {payload.stream_id}")
-    _stop_process(payload.stream_id)
+    # Hapus panggilan _stop_process untuk mengizinkan beberapa stream
 
     try:
-        logger.info(f"Memulai pengunduhan media untuk stream {payload.stream_id}...")
-        rewritten_command, media_dir = download_media_and_rewrite_command(payload.stream_id, payload.ffmpeg_command)
+        # Gunakan timestamp untuk membuat direktori media unik untuk setiap pekerjaan
+        job_timestamp = int(time.time())
+        unique_media_dir_name = f"{payload.stream_id}_{job_timestamp}"
+        
+        logger.info(f"Memulai pengunduhan media untuk pekerjaan stream {payload.stream_id}...")
+        rewritten_command, media_dir = download_media_and_rewrite_command(unique_media_dir_name, payload.ffmpeg_command)
         logger.info(f"Pengunduhan media selesai. Perintah FFmpeg yang baru: {' '.join(rewritten_command)}")
 
         process = subprocess.Popen(rewritten_command, text=True)
-        running_processes[payload.stream_id] = process
-        logger.info(f"Memulai proses FFmpeg untuk stream {payload.stream_id} dengan PID: {process.pid}")
+        job_id = process.pid
+        
+        running_processes[job_id] = {
+            "process": process,
+            "stream_id": payload.stream_id,
+            "media_dir": media_dir
+        }
+        logger.info(f"Memulai proses FFmpeg untuk stream {payload.stream_id} dengan PID (Job ID): {job_id}")
 
-        monitor_thread = threading.Thread(target=_monitor_process, args=(process, payload, media_dir))
+        monitor_thread = threading.Thread(target=_monitor_process, args=(job_id, payload))
         monitor_thread.daemon = True
         monitor_thread.start()
 
@@ -236,12 +276,12 @@ async def start_stream(payload: StreamStartPayload, background_tasks: Background
 
 @router.post("/stream/stop", dependencies=[Depends(verify_api_key)])
 async def stop_stream(payload: StreamStopPayload):
-    """Menghentikan proses streaming FFmpeg yang sedang berjalan."""
-    logger.info(f"Menerima permintaan untuk menghentikan stream ID: {payload.stream_id}")
-    if payload.stream_id not in running_processes:
-        return {"status": "not_found", "message": f"Stream {payload.stream_id} not found or not running."}
-    _stop_process(payload.stream_id)
-    return {"status": "success", "message": f"Stop command issued for stream {payload.stream_id}."}
+    """Menghentikan semua proses streaming FFmpeg yang cocok dengan stream_id."""
+    logger.info(f"Menerima permintaan untuk menghentikan semua stream dengan ID: {payload.stream_id}")
+    stopped_count = _stop_processes_by_stream_id(payload.stream_id)
+    if stopped_count == 0:
+        return {"status": "not_found", "message": f"No running streams found for ID {payload.stream_id}."}
+    return {"status": "success", "message": f"Stop command issued for {stopped_count} process(es) for stream ID {payload.stream_id}."}
 
 @router.post("/thumbnail/generate", dependencies=[Depends(verify_api_key)])
 async def generate_thumbnail(payload: ThumbnailGeneratePayload):
@@ -287,7 +327,9 @@ async def get_stats():
 @router.get("/health")
 async def health_check():
     """Endpoint sederhana untuk memeriksa apakah agen berjalan."""
-    return {"status": "ok", "running_streams": list(running_processes.keys())}
+    # Mengembalikan daftar stream_id yang sedang berjalan, bukan hanya job_id
+    running_stream_ids = [info["stream_id"] for info in running_processes.values()]
+    return {"status": "ok", "running_streams": running_stream_ids, "process_count": len(running_processes)}
 
 # --- Endpoint Manajemen Agen ---
 def _run_agentctl_command(command: str) -> str:
