@@ -118,9 +118,8 @@ def _monitor_process(process: subprocess.Popen, payload: StreamStartPayload):
         _send_status_update(payload.callback_url, payload.callback_api_key, payload.stream_id, "LIVE", "Stream is now live on VPS.")
     else:
         # Proses gagal dimulai
-        error_output = process.stderr.read() if process.stderr else "No stderr."
-        logger.error(f"FFmpeg untuk stream {payload.stream_id} gagal dimulai. Kode: {process.returncode}. Output: {error_output}")
-        _send_status_update(payload.callback_url, payload.callback_api_key, payload.stream_id, "Error", f"FFmpeg failed to start on VPS. Code: {process.returncode}")
+        logger.error(f"FFmpeg untuk stream {payload.stream_id} gagal dimulai dengan kode {process.returncode}. Periksa log agen untuk detail.")
+        _send_status_update(payload.callback_url, payload.callback_api_key, payload.stream_id, "Error", f"FFmpeg failed to start on VPS with code {process.returncode}. Check agent logs for details.")
         return
 
     # Tunggu hingga proses selesai
@@ -131,9 +130,8 @@ def _monitor_process(process: subprocess.Popen, payload: StreamStartPayload):
         logger.info(f"Stream {payload.stream_id} selesai dengan sukses.")
         _send_status_update(payload.callback_url, payload.callback_api_key, payload.stream_id, "Idle", "Stream finished successfully on VPS.")
     else:
-        error_output = process.stderr.read() if process.stderr else "No stderr."
-        logger.error(f"Stream {payload.stream_id} berhenti dengan error. Kode: {process.returncode}. Output: {error_output}")
-        _send_status_update(payload.callback_url, payload.callback_api_key, payload.stream_id, "Error", f"FFmpeg exited with code {process.returncode} on VPS.")
+        logger.error(f"Stream {payload.stream_id} berhenti dengan error. Kode: {process.returncode}. Periksa log agen untuk detail.")
+        _send_status_update(payload.callback_url, payload.callback_api_key, payload.stream_id, "Error", f"FFmpeg exited with code {process.returncode} on VPS. Check agent logs for details.")
     
     # Bersihkan dari daftar proses yang berjalan
     if payload.stream_id in running_processes:
@@ -154,10 +152,9 @@ async def start_stream(payload: StreamStartPayload, background_tasks: Background
 
     try:
         # Jalankan perintah FFmpeg sebagai subproses
+        # stdout dan stderr tidak di-pipe untuk menghindari deadlock. Output akan masuk ke log kontainer.
         process = subprocess.Popen(
             payload.ffmpeg_command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
             text=True
         )
         running_processes[payload.stream_id] = process
@@ -188,6 +185,42 @@ async def stop_stream(payload: StreamStopPayload):
     _stop_process(payload.stream_id)
 
     return {"status": "success", "message": f"Stop command issued for stream {payload.stream_id}."}
+
+@router.get("/test-streaming", dependencies=[Depends(verify_api_key)])
+async def test_streaming():
+    """
+    Menjalankan tes FFmpeg sederhana untuk memverifikasi fungsionalitas streaming.
+    """
+    logger.info("Menerima permintaan untuk tes streaming.")
+    test_command = [
+        "ffmpeg", "-f", "lavfi", "-i", "testsrc=duration=5:size=1280x720:rate=30",
+        "-f", "null", "-"
+    ]
+    try:
+        result = subprocess.run(
+            test_command,
+            capture_output=True,
+            text=True,
+            timeout=20  # Timeout 20 detik untuk jaga-jaga
+        )
+        if result.returncode == 0:
+            logger.info("Tes streaming FFmpeg berhasil.")
+            return {"status": "success", "details": "FFmpeg test command ran successfully."}
+        else:
+            logger.error(f"Tes streaming FFmpeg gagal. Kode: {result.returncode}\nStderr: {result.stderr}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"FFmpeg test failed with code {result.returncode}. Stderr: {result.stderr}"
+            )
+    except FileNotFoundError:
+        logger.error("Perintah FFmpeg tidak ditemukan.")
+        raise HTTPException(status_code=500, detail="FFmpeg command not found. Is FFmpeg installed and in the system's PATH?")
+    except subprocess.TimeoutExpired:
+        logger.error("Tes streaming FFmpeg timeout.")
+        raise HTTPException(status_code=500, detail="FFmpeg test command timed out after 20 seconds.")
+    except Exception as e:
+        logger.error(f"Terjadi kesalahan tak terduga saat tes streaming: {e}")
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred during the test: {str(e)}")
 
 @router.get("/health")
 async def health_check():
