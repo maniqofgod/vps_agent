@@ -8,6 +8,7 @@ import threading
 import requests
 import time
 import secrets
+import psutil
 from dotenv import load_dotenv, find_dotenv, set_key
 
 # --- Konfigurasi Awal & Pembuatan Kunci API ---
@@ -90,7 +91,7 @@ def _stop_process(stream_id: int):
 def _send_status_update(callback_url: str, api_key: str, stream_id: int, status: str, details: str = ""):
     """Mengirim pembaruan status kembali ke server utama."""
     payload = {"stream_id": stream_id, "status": status, "details": details}
-    headers = {"X-Agent-Api-Key": api_key}
+    headers = {"x-agent-api-key": api_key}
     try:
         # Coba beberapa kali jika gagal
         for attempt in range(3):
@@ -227,6 +228,26 @@ async def test_streaming():
     except Exception as e:
         logger.error(f"Terjadi kesalahan tak terduga saat tes streaming: {e}")
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred during the test: {str(e)}")
+
+@router.get("/stats", dependencies=[Depends(verify_api_key)])
+async def get_stats():
+    """Mengembalikan statistik penggunaan sistem (CPU, RAM, Jaringan)."""
+    try:
+        cpu_usage = psutil.cpu_percent(interval=1)
+        ram_usage = psutil.virtual_memory().percent
+        net_io = psutil.net_io_counters()
+        
+        return {
+            "cpu_usage_percent": cpu_usage,
+            "ram_usage_percent": ram_usage,
+            "network_io": {
+                "sent": f"{net_io.bytes_sent / 1e9:.2f} GB",
+                "recv": f"{net_io.bytes_recv / 1e9:.2f} GB"
+            }
+        }
+    except Exception as e:
+        logger.error(f"Gagal mengambil statistik sistem: {e}")
+        raise HTTPException(status_code=500, detail=f"Could not retrieve system stats: {e}")
 
 @router.get("/health")
 async def health_check():
