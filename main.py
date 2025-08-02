@@ -189,7 +189,7 @@ async def stop_stream(payload: StreamStopPayload):
 @router.get("/test-streaming", dependencies=[Depends(verify_api_key)])
 async def test_streaming():
     """
-    Menjalankan tes FFmpeg sederhana untuk memverifikasi fungsionalitas streaming.
+    Menjalankan tes FFmpeg sederhana dan mengembalikan log output.
     """
     logger.info("Menerima permintaan untuk tes streaming.")
     test_command = [
@@ -201,17 +201,24 @@ async def test_streaming():
             test_command,
             capture_output=True,
             text=True,
-            timeout=20  # Timeout 20 detik untuk jaga-jaga
+            timeout=20,
+            encoding='utf-8'
         )
-        if result.returncode == 0:
+        
+        status = "success" if result.returncode == 0 else "failure"
+        log_output = result.stdout + "\n" + result.stderr
+        
+        if status == "success":
             logger.info("Tes streaming FFmpeg berhasil.")
-            return {"status": "success", "details": "FFmpeg test command ran successfully."}
         else:
-            logger.error(f"Tes streaming FFmpeg gagal. Kode: {result.returncode}\nStderr: {result.stderr}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"FFmpeg test failed with code {result.returncode}. Stderr: {result.stderr}"
-            )
+            logger.error(f"Tes streaming FFmpeg gagal. Kode: {result.returncode}")
+            
+        return {
+            "status": status,
+            "return_code": result.returncode,
+            "logs": log_output
+        }
+
     except FileNotFoundError:
         logger.error("Perintah FFmpeg tidak ditemukan.")
         raise HTTPException(status_code=500, detail="FFmpeg command not found. Is FFmpeg installed and in the system's PATH?")
