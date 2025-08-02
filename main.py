@@ -38,10 +38,11 @@ def download_media_and_rewrite_command(stream_id: int, command: List[str]) -> (L
     for i, arg in enumerate(command):
         if arg == '-i':
             is_input_arg = True
-            new_command.append(arg)
-            continue
+        new_command.append(arg)
 
         if is_input_arg and (arg.startswith('http://') or arg.startswith('https://')):
+            # This is a URL input, download it and replace the arg
+            new_command.pop() # Hapus URL asli
             try:
                 url = arg
                 filename = os.path.basename(urlparse(url).path)
@@ -68,9 +69,9 @@ def download_media_and_rewrite_command(stream_id: int, command: List[str]) -> (L
             finally:
                 is_input_arg = False
         else:
-            new_command.append(arg)
             is_input_arg = False
             
+    logger.info(f"Final rewritten command: {' '.join(new_command)}")
     return new_command, stream_media_dir
 
 # --- Konfigurasi Awal & Pembuatan Kunci API ---
